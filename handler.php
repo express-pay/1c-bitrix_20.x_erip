@@ -485,7 +485,7 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 	 * @param Payment $payment
 	 * @return bool
 	 */
-	private function getSecretWordForNotif(Payment $payment = null): bool
+	private function getSecretWordForNotif(Payment $payment = null): string
 	{
 		return $this->getBusinessValue($payment, 'ERIP_SECRET_WORD_FROM_NOTIFICATION');
 	}
