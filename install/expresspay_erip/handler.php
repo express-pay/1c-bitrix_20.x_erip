@@ -65,7 +65,8 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 		$result = $this->send(self::SEND_METHOD_HTTP_POST, $url, $request_params);
 
 		if (isset($result->getData()['Errors'])) {
-			$this->setExtraParams(['message' => $result->getData()['Errors'][0]]);
+			PaySystem\Logger::addDebugInfo(__CLASS__ . ': API errors: ' . print_r($result->getData()['Errors'], 1));
+			$this->setExtraParams(['message' => Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_ERROR_GENERAL')]);
 		} else {
 			$this->setExtraParams($this->getTemplateParams($payment, $result->getData()));
 		}
@@ -176,8 +177,34 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 		$address_edit = $this->getBusinessValue($payment, 'ERIP_IS_ADDRESS_EDITABLE');
 		$amount_edit = $this->getBusinessValue($payment, 'ERIP_IS_AMOUNT_EDITABLE');
 
+		// Доверенный хост только из настроек; никакого fallback на заголовок Host
+		$currentHost = trim((string)\Bitrix\Main\Config\Option::get('main', 'server_name'));
 
-		$url = ((!empty($_SERVER['HTTPS'])) ? 'https' : 'http') . '://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI'];
+		if ($currentHost === '' || !preg_match('/^[a-z0-9.\-]+(:\d+)?$/i', $currentHost)) {
+			PaySystem\Logger::addDebugInfo(__CLASS__ . ': main:server_name is not configured — cannot build trusted return URL');
+			throw new Main\SystemException('main:server_name is not configured');
+		}
+
+		$protocol = 'https://';
+
+		// Несовпадение Host — это отказ, а не просто запись в лог
+		$requestHost = $_SERVER['HTTP_HOST'] ?? '';
+		if ($requestHost !== '' && strcasecmp($requestHost, $currentHost) !== 0) {
+			PaySystem\Logger::addDebugInfo(sprintf(
+				'%s: Host mismatch rejected. HTTP_HOST=%s, trusted_host=%s',
+				__CLASS__, $requestHost, $currentHost
+			));
+			throw new Main\SystemException('Host header does not match the configured site host');
+		}
+
+		$path = '/bitrix/tools/sale_ps_result.php';
+
+		$existingParams = [];
+		$returnParams = array_merge($existingParams, ['result' => 'success', 'ExpressPayAmount' => $out_summ]);
+		$failParams = array_merge($existingParams, ['result' => 'fail']);
+
+		$returnUrl = $protocol . $currentHost . $path . '?' . http_build_query($returnParams);
+		$failUrl = $protocol . $currentHost . $path . '?' . http_build_query($failParams);
 
 		$request_params = array(
 			'ServiceId'         => $serviceId,
@@ -185,8 +212,8 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 			'Amount'            => $out_summ,
 			'Currency'          => 933,
 			'ReturnType'        => 'json',
-			'ReturnUrl'         => $url . "&result=success&ExpressPayAmount={$out_summ}",
-			'FailUrl'           => $url . "&result=fail",
+			'ReturnUrl'         => $returnUrl,
+			'FailUrl'           => $failUrl,
 			'Expiration'        => '',
 			'Info'              => $info,
 			'Surname'           => '',
@@ -291,7 +318,12 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 		if ($method === self::SEND_METHOD_HTTP_GET) {
 			$response = $httpClient->get($url);
 		} else {
-			PaySystem\Logger::addDebugInfo(__CLASS__ . ': request data: ' . print_r($params, 1));
+			PaySystem\Logger::addDebugInfo(__CLASS__ . ': request data: ' . print_r([
+				'AccountNo' => $params['AccountNo'] ?? null,
+				'Amount'    => $params['Amount'] ?? null,
+				'Currency'  => $params['Currency'] ?? null,
+				'ServiceId' => $params['ServiceId'] ?? null,
+			], 1));
 
 			$response = $httpClient->post($url, $params);
 		}
@@ -305,7 +337,7 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 			return $result;
 		}
 
-		PaySystem\Logger::addDebugInfo(__CLASS__ . ': response data: ' . $response);
+		PaySystem\Logger::addDebugInfo(__CLASS__ . ': response received, length: ' . strlen((string)$response));
 
 		$response = static::decode($response);
 		if ($response) {
@@ -343,25 +375,68 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 	{
 		$result = new ServiceResult();
 
-		$data = $request->getPost("Data");
-		$signature = $request->getPost("Signature");
+		$rawData   = (string)$request->getPost("Data");
+		$signature = trim((string)$request->getPost("Signature"));
 
-		$data = static::decode($data);
+		$data = static::decode($rawData);
 
-		if($data['CmdType'] == 3){
-			if($data['Status'] == 3 || $data['Status'] == 6) {
+		if (!is_array($data)) {
+			$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_INVALID_NOTIFICATION_DATA')));
+			return $result;
+		}
 
-				if ($this->isUseSignatureForNotif() && isset($signature)){
-					if ($this->computeNotifSignature($request->getPost("Data")) !== $signature){
-						$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_WRONG_SIGNATURE')));
-					}
+		$cmdType = filter_var($data['CmdType'] ?? null, FILTER_VALIDATE_INT);
+		$status  = filter_var($data['Status'] ?? null, FILTER_VALIDATE_INT);
 
-				}
+		if ($cmdType === false || $status === false) {
+			$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_INVALID_NOTIFICATION_DATA')));
+			return $result;
+		}
 
-				$result->setOperationType(PaySystem\ServiceResult::MONEY_COMING);
-				$result->setPsData($this->getPaymentField($data));
+		// Подпись проверяется ВСЕГДА — fail-closed
+		$computedSignature = $this->computeNotifSignature($rawData);
 
+		if ($computedSignature === null) {
+			PaySystem\Logger::addDebugInfo(__CLASS__ . ': ' . Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_EMPTY_SECRET_CONFIG_ERROR'));
+			$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_EMPTY_SECRET_CONFIG_ERROR')));
+			return $result;
+		}
+
+		if ($signature === '' || !hash_equals($computedSignature, strtoupper($signature))) {
+			PaySystem\Logger::addDebugInfo(sprintf(
+				'%s: rejected unsigned/invalid notification for payment %d',
+				__CLASS__, $payment->getId()
+			));
+			$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_WRONG_SIGNATURE')));
+			return $result;
+		}
+
+		if ($cmdType === 3 && ($status === 3 || $status === 6)) {
+
+			$notificationAccountNo = filter_var($data['AccountNo'] ?? null, FILTER_VALIDATE_INT);
+			if ($notificationAccountNo === false || $notificationAccountNo !== $payment->getId()) {
+				PaySystem\Logger::addDebugInfo(sprintf(
+					'%s: AccountNo mismatch. Notification=%s, Payment=%d',
+					__CLASS__, var_export($data['AccountNo'] ?? null, true), $payment->getId()
+				));
+				$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_MISMATCH')));
+				return $result;
 			}
+
+			if ($payment->isPaid()) {
+				$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_ALREADY_PAID')));
+				return $result;
+			}
+
+			$notificationAmount = PriceMaths::roundPrecision((float)str_replace(',', '.', $data['Amount']));
+			$expectedSum = PriceMaths::roundPrecision($payment->getSum());
+			if ($notificationAmount !== $expectedSum) {
+				$result->addError(PaySystem\Error::create(Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_AMOUNT_MISMATCH')));
+				return $result;
+			}
+
+			$result->setOperationType(PaySystem\ServiceResult::MONEY_COMING);
+			$result->setPsData($this->getPaymentField($data));
 		}
 
 		return $result;
@@ -378,20 +453,26 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 	 */
 	private function getPaymentField($data): array
 	{
+		$payer = isset($data['Payer']) && is_scalar($data['Payer']) ? (string)$data['Payer'] : '';
+		$payer = htmlspecialcharsbx(mb_substr($payer, 0, 255));
+
+		$amount = PriceMaths::roundPrecision((float)str_replace(',', '.', (string)($data['Amount'] ?? '')));
+		$accountNo = (string)($data['AccountNo'] ?? '');
+
 		$description = Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_DESCRIPTION', [
-			'#ID#' => $data['AccountNo'],
-			'#Payer#' => $data['Payer'],
+			'#ID#' => $accountNo,
+			'#Payer#' => $payer,
 		]);
 
 		$fields = [
 			"PS_STATUS" => "Y",
-			"PS_STATUS_CODE" => $data['Status'],
-			"PS_STATUS_DESCRIPTION" => $data['Status'] == 6 ? Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION_CARD') : Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION'),
+			"PS_STATUS_CODE" => (int)($data['Status'] ?? 0),
+			"PS_STATUS_DESCRIPTION" => ((int)($data['Status'] ?? 0) === 6) ? Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION_CARD') : Loc::getMessage('SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION'),
 			"PS_STATUS_MESSAGE" => $description,
-			"PS_SUM" => $data['Amount'],
+			"PS_SUM" => number_format($amount, 2, '.', ''),
 			"PS_CURRENCY" => 'BYN',
 			"PS_RESPONSE_DATE" => new \Bitrix\Main\Type\DateTime(),
-			"PAY_VOUCHER_NUM" => $data['AccountNo'],
+			"PAY_VOUCHER_NUM" => $accountNo,
 			"PAY_VOUCHER_DATE" => new \Bitrix\Main\Type\Date()
 		];
 		
@@ -407,15 +488,11 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 	 */
 	private function computeNotifSignature($json)
 	{
-    	$hash = NULL;
-		$secretWord = trim($this->getSecretWordForNotif());
-	
-    	if (empty($secretWord))
-			$hash = strtoupper(hash_hmac('sha1', $json, ""));
-    	else
-        	$hash = strtoupper(hash_hmac('sha1', $json, $secretWord));
-
-    	return $hash;
+		$secretWord = $this->getSecretWordForNotif();
+		if (empty($secretWord)) {
+			return null;
+		}
+		return strtoupper(hash_hmac('sha1', $json, $secretWord));
 	}
 
 	/**
@@ -474,18 +551,9 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 
 	/**
 	 * @param Payment $payment
-	 * @return bool
+	 * @return mixed|string
 	 */
-	private function isUseSignatureForNotif(Payment $payment = null): bool
-	{
-		return ($this->getBusinessValue($payment, 'ERIP_IS_USE_SIGNATURE_FROM_NOTIFICATION') === 'Y');
-	}
-
-	/**
-	 * @param Payment $payment
-	 * @return bool
-	 */
-	private function getSecretWordForNotif(Payment $payment = null): bool
+	private function getSecretWordForNotif(Payment $payment = null)
 	{
 		return $this->getBusinessValue($payment, 'ERIP_SECRET_WORD_FROM_NOTIFICATION');
 	}
