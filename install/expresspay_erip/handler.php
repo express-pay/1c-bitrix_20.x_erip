@@ -187,14 +187,14 @@ class ExpressPay_EripHandler extends PaySystem\ServiceHandler
 
 		$protocol = 'https://';
 
-		// Несовпадение Host — это отказ, а не просто запись в лог
+		// Адреса возврата строятся только из server_name, поэтому Host запроса на них не влияет.
+		// Несовпадение (например, www.site.by и site.by) только пишем в лог, оплату не прерываем.
 		$requestHost = $_SERVER['HTTP_HOST'] ?? '';
 		if ($requestHost !== '' && strcasecmp($requestHost, $currentHost) !== 0) {
 			PaySystem\Logger::addDebugInfo(sprintf(
-				'%s: Host mismatch rejected. HTTP_HOST=%s, trusted_host=%s',
+				'%s: Host mismatch. HTTP_HOST=%s, trusted_host=%s',
 				__CLASS__, $requestHost, $currentHost
 			));
-			throw new Main\SystemException('Host header does not match the configured site host');
 		}
 
 		$path = '/bitrix/tools/sale_ps_result.php';

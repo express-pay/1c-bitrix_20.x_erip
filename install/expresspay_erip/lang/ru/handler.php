@@ -1,8 +1,8 @@
 <?php
-$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_DESCRIPTION"] = "������ ����� ����� #ID#, ���������� #Payer#";
-$MESS["SALE_HPS_EXPRESSPAY_ERIP_WRONG_SIGNATURE"] = "������ ������������ ������: �������� �������� �������";
-$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION"] = "�������";
-$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION_CARD"] = "������� � ������� ���������� �����";
+$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_DESCRIPTION"] = "Оплата счета номер #ID#, плательщик #Payer#";
+$MESS["SALE_HPS_EXPRESSPAY_ERIP_WRONG_SIGNATURE"] = "Ошибка фиксирования оплаты: Неверная цифровая подпись";
+$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION"] = "Оплачен";
+$MESS["SALE_HPS_EXPRESSPAY_ERIP_PAYMENT_STATUS_DESCRIPTION_CARD"] = "Оплачен с помощью банковской карты";
 $MESS["SALE_HPS_EXPRESSPAY_ERIP_ERROR_GENERAL"] = "При обработке платежа произошла ошибка. Пожалуйста, попробуйте позже или обратитесь в службу поддержки.";
 $MESS["SALE_HPS_EXPRESSPAY_ERIP_EMPTY_SIGNATURE"] = "Подпись уведомления отсутствует или пуста";
 $MESS["SALE_HPS_EXPRESSPAY_ERIP_EMPTY_SECRET_CONFIG_ERROR"] = "Ошибка конфигурации: включена проверка подписи уведомлений, но секретное слово не задано";
